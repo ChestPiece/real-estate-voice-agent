@@ -88,3 +88,30 @@ describe('Twilio webhooks', () => {
     expect(res.body).toContain('<Stream url="wss://example.ngrok.app/media-stream/lead-1/CA123"');
   });
 });
+
+describe('POST /call-status/:leadId', () => {
+  const form = (body: string) => ({ method: 'POST' as const, url: '/call-status/lead-1', payload: body, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+
+  it('403 when unsigned and writes nothing', async () => {
+    const res = await buildServer(deps()).inject(form('CallSid=CA123&CallStatus=completed'));
+    expect(res.statusCode).toBe(403);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('records terminal statuses with ended_at', async () => {
+    const res = await buildServer(deps({ validateTwilio: () => true })).inject(form('CallSid=CA123&CallStatus=no-answer'));
+    expect(res.statusCode).toBe(204);
+    expect(calls).toEqual([{ lead_id: 'lead-1', twilio_sid: 'CA123', status: 'no_answer', ended_at: '2026-10-11T08:00:00.000Z' }]);
+  });
+
+  it('records in-progress without ended_at', async () => {
+    await buildServer(deps({ validateTwilio: () => true })).inject(form('CallSid=CA123&CallStatus=in-progress'));
+    expect(calls).toEqual([{ lead_id: 'lead-1', twilio_sid: 'CA123', status: 'in_progress' }]);
+  });
+
+  it('ignores transient statuses like ringing', async () => {
+    const res = await buildServer(deps({ validateTwilio: () => true })).inject(form('CallSid=CA123&CallStatus=ringing'));
+    expect(res.statusCode).toBe(204);
+    expect(calls).toHaveLength(0);
+  });
+});

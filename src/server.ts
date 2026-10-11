@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { buildAgent } from './agent.js';
 import { isWithinCallingHours, normalizePhone } from './core.js';
 import * as db from './db.js';
+import { historyToTranscript, makeTools, mapTwilioStatus } from './tools.js';
 
 export type Deps = {
   getAgentByClientSlug: typeof db.getAgentByClientSlug;
@@ -91,6 +92,22 @@ export function buildServer(deps: Deps = defaultDeps): FastifyInstance {
     );
   });
 
+  app.post<{ Params: { leadId: string } }>('/call-status/:leadId', async (req, reply) => {
+    if (!isFromTwilio(req)) return reply.code(403).send();
+    const { CallSid, CallStatus } = (req.body ?? {}) as Record<string, string>;
+    const status = mapTwilioStatus(CallStatus ?? '');
+    if (status && CallSid) {
+      const terminal = status !== 'in_progress';
+      await deps.upsertCall({
+        lead_id: req.params.leadId,
+        twilio_sid: CallSid,
+        status,
+        ...(terminal && { ended_at: deps.now().toISOString() }),
+      });
+    }
+    return reply.code(204).send();
+  });
+
   app.register(async (scoped) => {
     scoped.get<{ Params: { leadId: string; callSid: string } }>(
       '/media-stream/:leadId/:callSid',
@@ -99,17 +116,47 @@ export function buildServer(deps: Deps = defaultDeps): FastifyInstance {
         const found = await deps.getLeadWithAgent(req.params.leadId).catch(() => null);
         if (!found) return socket.close();
 
-        const session = new RealtimeSession(buildAgent(found.agent, found.lead), {
+        const session = new RealtimeSession(buildAgent(found.agent, found.lead, makeTools({ leadId: found.lead.id })), {
           transport: new TwilioRealtimeTransportLayer({ twilioWebSocket: socket }),
           model: env('REALTIME_MODEL') || 'gpt-realtime-2.1',
           config: {
             audio: {
-              input: { turnDetection: { type: 'semantic_vad', createResponse: true, interruptResponse: true } },
+              input: {
+                transcription: { model: 'gpt-live-transcribe' },
+                turnDetection: { type: 'semantic_vad', createResponse: true, interruptResponse: true },
+              },
               output: { voice: found.agent.voice },
             },
           },
         });
-        await session.connect({ apiKey: env('OPENAI_API_KEY') });
+        // Persist the transcript once, whichever way the call ends; never let this crash the worker.
+        let saved = false;
+        const finish = async (status: db.CallStatus) => {
+          if (saved) return;
+          saved = true;
+          try {
+            session.close();
+            await deps.upsertCall({
+              lead_id: found.lead.id,
+              twilio_sid: req.params.callSid,
+              status,
+              transcript: historyToTranscript(session.history),
+            });
+          } catch (err) {
+            req.log.error({ err }, 'failed to finish call');
+          }
+        };
+        socket.on('close', () => void finish('completed'));
+        socket.on('error', () => void finish('failed'));
+        session.on('error', (e) => req.log.error({ err: e }, 'realtime session error'));
+
+        try {
+          await session.connect({ apiKey: env('OPENAI_API_KEY') });
+        } catch (err) {
+          req.log.error({ err }, 'realtime connect failed');
+          socket.close();
+          return finish('failed');
+        }
         // Outbound call: the agent speaks first (the prompt's opening line).
         session.transport.sendEvent({ type: 'response.create' });
       },
