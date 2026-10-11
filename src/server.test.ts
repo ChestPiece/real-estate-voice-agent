@@ -4,7 +4,7 @@ import type { AgentConfig, Lead } from './db.js';
 
 const agent: AgentConfig = {
   id: 'a1', client_id: 'c1', persona_name: 'Sara', brokerage_name: 'Marina Bay Realty', agent_name: 'Omar',
-  voice: 'verse', prompt_vars: {}, calling_start: '09:00', calling_end: '18:00', transfer_number: null,
+  voice: 'verse', prompt_vars: { areas: 'Dubai Marina', specialty: 'apartments' }, calling_start: '09:00', calling_end: '18:00', transfer_number: null,
 };
 
 let placed: { to: string; leadId: string }[];
@@ -16,6 +16,7 @@ function deps(overrides: Partial<Deps> = {}): Deps {
     insertLead: async (l) => ({ ...l, id: 'lead-1' }) as Lead,
     getLeadWithAgent: async () => null,
     upsertCall: async (c) => void calls.push(c),
+    saveTranscript: async () => {},
     placeCall: async (to, leadId) => (placed.push({ to, leadId }), 'CA123'),
     validateTwilio: () => false,
     now: () => new Date('2026-10-11T08:00:00Z'), // 12:00 Dubai
@@ -74,6 +75,22 @@ describe('POST /dial', () => {
     expect(placed).toEqual([{ to: '+971501234567', leadId: 'lead-1' }]);
     expect(calls).toEqual([{ lead_id: 'lead-1', twilio_sid: 'CA123', status: 'queued' }]);
   });
+
+  it('500 agent_misconfigured before dialing when prompt vars are missing', async () => {
+    const broken = { ...agent, prompt_vars: {} };
+    const res = await dial(buildServer(deps({ getAgentByClientSlug: async () => broken })), { clientSlug: 'demo', phone: '0501234567' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json()).toEqual({ reason: 'agent_misconfigured' });
+    expect(placed).toHaveLength(0);
+  });
+
+  it('502 dial_failed when Twilio rejects the call', async () => {
+    const app = buildServer(deps({ placeCall: async () => { throw new Error('unverified number'); } }));
+    const res = await dial(app, { clientSlug: 'demo', phone: '0501234567' });
+    expect(res.statusCode).toBe(502);
+    expect(res.json()).toEqual({ reason: 'dial_failed', leadId: 'lead-1', message: 'unverified number' });
+    expect(calls).toHaveLength(0);
+  });
 });
 
 describe('Twilio webhooks', () => {
@@ -85,7 +102,12 @@ describe('Twilio webhooks', () => {
   it('signed /twiml streams to the lead media socket', async () => {
     const res = await buildServer(deps({ validateTwilio: () => true })).inject({ method: 'POST', url: '/twiml/lead-1', payload: 'CallSid=CA123', headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('<Stream url="wss://example.ngrok.app/media-stream/lead-1/CA123"');
+    expect(res.body).toMatch(/<Stream url="wss:\/\/example\.ngrok\.app\/media-stream\/lead-1\/CA123\/[0-9a-f]{64}"/);
+  });
+
+  it('400 on signed /twiml without a CallSid', async () => {
+    const res = await buildServer(deps({ validateTwilio: () => true })).inject({ method: 'POST', url: '/twiml/lead-1' });
+    expect(res.statusCode).toBe(400);
   });
 });
 

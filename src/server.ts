@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import fastifyFormBody from '@fastify/formbody';
@@ -17,6 +18,7 @@ export type Deps = {
   insertLead: typeof db.insertLead;
   getLeadWithAgent: typeof db.getLeadWithAgent;
   upsertCall: typeof db.upsertCall;
+  saveTranscript: typeof db.saveTranscript;
   placeCall: (to: string, leadId: string) => Promise<string>;
   validateTwilio: (signature: string | undefined, url: string, params: Record<string, string>) => boolean;
   now: () => Date;
@@ -39,6 +41,16 @@ const defaultDeps: Deps = {
   validateTwilio: (signature, url, params) =>
     !!signature && twilio.validateRequest(env('TWILIO_AUTH_TOKEN'), signature, url, params),
   now: () => new Date(),
+};
+
+/** Unguessable path segment so only the TwiML we served can open a media stream. */
+const streamToken = (leadId: string, callSid: string) =>
+  createHmac('sha256', env('DIAL_API_KEY')).update(`${leadId}:${callSid}`).digest('hex');
+
+const tokenMatches = (token: string, leadId: string, callSid: string) => {
+  const expected = Buffer.from(streamToken(leadId, callSid));
+  const given = Buffer.from(token);
+  return !!env('DIAL_API_KEY') && given.length === expected.length && timingSafeEqual(given, expected);
 };
 
 const DialBody = z.object({
@@ -70,6 +82,12 @@ export function buildServer(deps: Deps = defaultDeps): FastifyInstance {
     if (!agent) return reply.code(404).send({ reason: 'unknown_client' });
     if (!isWithinCallingHours(deps.now(), { start: agent.calling_start, end: agent.calling_end }))
       return reply.code(409).send({ reason: 'outside_calling_hours' });
+    try {
+      buildAgent(agent, { id: '', client_id: agent.client_id, name: null, phone, property: null, source: 'api' });
+    } catch (err) {
+      req.log.error({ err }, 'agent config cannot fill the prompt');
+      return reply.code(500).send({ reason: 'agent_misconfigured' });
+    }
 
     const lead = await deps.insertLead({
       client_id: agent.client_id,
@@ -78,17 +96,25 @@ export function buildServer(deps: Deps = defaultDeps): FastifyInstance {
       property: body.data.property ?? null,
       source: 'api',
     });
-    const callSid = await deps.placeCall(phone, lead.id);
+    let callSid: string;
+    try {
+      callSid = await deps.placeCall(phone, lead.id);
+    } catch (err) {
+      req.log.error({ err }, 'twilio call create failed');
+      return reply.code(502).send({ reason: 'dial_failed', leadId: lead.id, message: (err as Error).message });
+    }
     await deps.upsertCall({ lead_id: lead.id, twilio_sid: callSid, status: 'queued' });
     return reply.code(202).send({ leadId: lead.id, callSid });
   });
 
-  app.all<{ Params: { leadId: string } }>('/twiml/:leadId', async (req, reply) => {
+  app.post<{ Params: { leadId: string } }>('/twiml/:leadId', async (req, reply) => {
     if (!isFromTwilio(req)) return reply.code(403).send();
-    const callSid = ((req.body ?? {}) as Record<string, string>).CallSid ?? 'unknown';
+    const callSid = ((req.body ?? {}) as Record<string, string>).CallSid;
+    if (!callSid) return reply.code(400).send();
     const host = new URL(env('PUBLIC_URL')).host;
+    const { leadId } = req.params;
     reply.type('text/xml').send(
-      `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://${host}/media-stream/${req.params.leadId}/${callSid}" /></Connect></Response>`,
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://${host}/media-stream/${leadId}/${callSid}/${streamToken(leadId, callSid)}" /></Connect></Response>`,
     );
   });
 
@@ -109,15 +135,26 @@ export function buildServer(deps: Deps = defaultDeps): FastifyInstance {
   });
 
   app.register(async (scoped) => {
-    scoped.get<{ Params: { leadId: string; callSid: string } }>(
-      '/media-stream/:leadId/:callSid',
+    scoped.get<{ Params: { leadId: string; callSid: string; token: string } }>(
+      '/media-stream/:leadId/:callSid/:token',
       { websocket: true },
       async (socket, req) => {
-        const found = await deps.getLeadWithAgent(req.params.leadId).catch(() => null);
+        const { leadId, callSid, token } = req.params;
+        if (!tokenMatches(token, leadId, callSid)) return socket.close();
+        // Attach the transport before any await: it must see Twilio's 'start' frame to learn the streamSid.
+        const transport = new TwilioRealtimeTransportLayer({ twilioWebSocket: socket });
+        const found = await deps.getLeadWithAgent(leadId).catch(() => null);
         if (!found) return socket.close();
+        let agent;
+        try {
+          agent = buildAgent(found.agent, found.lead, makeTools({ leadId: found.lead.id }));
+        } catch (err) {
+          req.log.error({ err }, 'agent config cannot fill the prompt');
+          return socket.close();
+        }
 
-        const session = new RealtimeSession(buildAgent(found.agent, found.lead, makeTools({ leadId: found.lead.id })), {
-          transport: new TwilioRealtimeTransportLayer({ twilioWebSocket: socket }),
+        const session = new RealtimeSession(agent, {
+          transport,
           model: env('REALTIME_MODEL') || 'gpt-realtime-2.1',
           config: {
             audio: {
@@ -130,24 +167,20 @@ export function buildServer(deps: Deps = defaultDeps): FastifyInstance {
           },
         });
         // Persist the transcript once, whichever way the call ends; never let this crash the worker.
+        // Status is owned by Twilio's /call-status callbacks, so this writes the transcript only.
         let saved = false;
-        const finish = async (status: db.CallStatus) => {
+        const finish = async () => {
           if (saved) return;
           saved = true;
           try {
             session.close();
-            await deps.upsertCall({
-              lead_id: found.lead.id,
-              twilio_sid: req.params.callSid,
-              status,
-              transcript: historyToTranscript(session.history),
-            });
+            await deps.saveTranscript(callSid, historyToTranscript(session.history));
           } catch (err) {
             req.log.error({ err }, 'failed to finish call');
           }
         };
-        socket.on('close', () => void finish('completed'));
-        socket.on('error', () => void finish('failed'));
+        socket.on('close', () => void finish());
+        socket.on('error', () => void finish());
         session.on('error', (e) => req.log.error({ err: e }, 'realtime session error'));
 
         try {
@@ -155,7 +188,7 @@ export function buildServer(deps: Deps = defaultDeps): FastifyInstance {
         } catch (err) {
           req.log.error({ err }, 'realtime connect failed');
           socket.close();
-          return finish('failed');
+          return finish();
         }
         // Outbound call: the agent speaks first (the prompt's opening line).
         session.transport.sendEvent({ type: 'response.create' });

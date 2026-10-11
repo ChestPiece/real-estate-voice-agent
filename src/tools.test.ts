@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { RunContext } from '@openai/agents';
 import { makeTools, historyToTranscript, mapTwilioStatus } from './tools.js';
+import { mergeQualification } from './db.js';
 
 const invoke = (t: any, args: object) => t.invoke(new RunContext({}), JSON.stringify(args));
 
@@ -53,5 +54,13 @@ describe('historyToTranscript', () => {
       { role: 'assistant', text: 'Hi Anas!' },
       { role: 'user', text: 'Hi, yes.' },
     ]);
+  });
+});
+
+describe('mergeQualification', () => {
+  it('keeps earlier answers when a later save sends nulls or empty areas', () => {
+    const first = mergeQualification(null, { intent: 'buy', budget_aed: 1500000, areas: ['Dubai Marina'], bedrooms: null, timeline: null, notes: null });
+    const second = mergeQualification(first, { intent: null, budget_aed: null, areas: [], bedrooms: 2, timeline: null, notes: null });
+    expect(second).toEqual({ intent: 'buy', budget_aed: 1500000, areas: ['Dubai Marina'], bedrooms: 2, timeline: null, notes: null });
   });
 });

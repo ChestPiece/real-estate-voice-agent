@@ -9,9 +9,9 @@ export function makeTools(ctx: { leadId: string }, store: Store = db): ReturnTyp
     tool({
       name: 'save_qualification',
       description:
-        'Save what you have learned about the lead. Call it once you know buy/rent, budget and area, and call it again whenever you learn more. Use null for anything not yet known.',
+        'Save what you have learned about the lead. Call it once you know buy/rent, budget and area, and call it again whenever you learn more. Use null (or [] for areas) for anything not yet known; that never erases what you saved earlier.',
       parameters: z.object({
-        intent: z.enum(['buy', 'rent']),
+        intent: z.enum(['buy', 'rent']).nullable(),
         budget_aed: z.number().nullable().describe('Budget in AED as a plain number, e.g. 1.5 million = 1500000'),
         areas: z.array(z.string()),
         bedrooms: z.number().int().nullable(),

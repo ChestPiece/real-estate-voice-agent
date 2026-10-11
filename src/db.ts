@@ -23,7 +23,7 @@ export type Lead = {
 };
 
 export type Qualification = {
-  intent: 'buy' | 'rent';
+  intent: 'buy' | 'rent' | null;
   budget_aed: number | null;
   areas: string[];
   bedrooms: number | null;
@@ -75,8 +75,21 @@ export async function upsertCall(call: {
   unwrap(await db().from('calls').upsert(call, { onConflict: 'twilio_sid' }));
 }
 
+/** Merges into the saved qualification: null / empty fields keep what was learned earlier. */
 export async function saveQualification(leadId: string, q: Qualification): Promise<void> {
-  unwrap(await db().from('leads').update({ qualification: q }).eq('id', leadId));
+  const row = unwrap(await db().from('leads').select('qualification').eq('id', leadId).single());
+  unwrap(await db().from('leads').update({ qualification: mergeQualification(row?.qualification, q) }).eq('id', leadId));
+}
+
+export function mergeQualification(old: Partial<Qualification> | null | undefined, q: Qualification): Qualification {
+  const known = Object.fromEntries(
+    Object.entries(q).filter(([, v]) => v !== null && !(Array.isArray(v) && v.length === 0)),
+  );
+  return { intent: null, budget_aed: null, areas: [], bedrooms: null, timeline: null, notes: null, ...old, ...known };
+}
+
+export async function saveTranscript(twilioSid: string, transcript: unknown): Promise<void> {
+  unwrap(await db().from('calls').update({ transcript }).eq('twilio_sid', twilioSid));
 }
 
 export async function saveViewing(leadId: string, v: { preferred_time: string; property: string | null }): Promise<void> {
