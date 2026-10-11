@@ -23,3 +23,19 @@ describe('fillPrompt', () => {
   it('throws on vars with neither value nor fallback', () =>
     expect(() => fillPrompt('{a} {b}', {}, {})).toThrow('Unfilled prompt variables: a, b'));
 });
+
+import { buildAgent } from './agent.js';
+
+describe('buildAgent', () => {
+  const config = {
+    id: 'a1', client_id: 'c1', persona_name: 'Sara', brokerage_name: 'Marina Bay Realty', agent_name: 'Omar',
+    voice: 'verse', prompt_vars: { areas: 'Dubai Marina', specialty: 'apartments' },
+    calling_start: '09:00', calling_end: '18:00', transfer_number: null,
+  };
+  it('greets a lead with no name or property naturally, no raw {vars}', () => {
+    const { instructions } = buildAgent(config, { id: 'l1', client_id: 'c1', name: null, phone: '+971501234567', property: null, source: 'api' });
+    expect(instructions).toContain('"Hi there! It\'s Sara from Marina Bay Realty');
+    expect(instructions).toContain('a property with us');
+    expect(instructions).not.toMatch(/\{\w+\}/);
+  });
+});
