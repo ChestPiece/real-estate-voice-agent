@@ -37,7 +37,7 @@ No Twilio, no ngrok, no code. You only pay OpenAI audio usage (a few cents per m
    - **Turn detection:** Semantic VAD
 3. Open `docs/playground-prompt.md` in this repo. It's Sara's real prompt with the demo values filled in. Copy all of it into the **Instructions / System prompt** box.
 4. Click **Start session**, allow the microphone, and say "Hello?" like you just picked up the phone. Sara should open with "Hi Anas! It's Sara from Marina Bay Realty…".
-5. Run through the role-play scenarios in section 3 below (interrupting, "are you a robot?", asking the price, and so on).
+5. Run through the "Role-play scenarios" further down (interrupting, "are you a robot?", asking the price, and so on).
    If Sara gets something wrong, edit `prompts/broker-base.md`. That's the file the real phone agent uses. Re-paste the changed text and try again.
 
 What Step 0 **doesn't** test: the phone call itself, and saving to Supabase. Steps 1–6 cover those.
@@ -141,7 +141,7 @@ Play a buyer and agree to a viewing, then hang up. In Supabase → **Table Edito
 
 Send the curl reply plus the red lines from the `npm run dev` window when asking for help.
 
-## 3. Role-play scenarios (all must pass before pitching)
+## Role-play scenarios (all must pass before pitching)
 | # | Scenario | Pass when | ✅/❌ |
 |---|---|---|---|
 | 1 | Happy path: buyer, budget, area, books Saturday 4pm | Reads the time back; `viewing.preferred_time` saved | |
@@ -157,7 +157,7 @@ Send the curl reply plus the red lines from the `npm run dev` window when asking
 
 Get at least 2 other people to run some of these. For each ❌, change **only** `prompts/broker-base.md` and re-run that scenario.
 
-## 4. Unit cost (fill in after 3 calls)
+## Unit cost (fill in after 3 calls)
 | Call | Minutes | OpenAI $ | Twilio $ | Total $ |
 |---|---|---|---|---|
 | 1 | | | | |
@@ -167,7 +167,7 @@ Get at least 2 other people to run some of these. For each ❌, change **only** 
 
 To cut cost, try `REALTIME_MODEL=gpt-realtime-mini` and re-run scenarios 1, 3 and 4 to check quality.
 
-## 5. Pitch assets
+## Pitch assets
 Record 2–3 calls (phone on speaker + screen showing the Supabase rows filling in) for LinkedIn and email outreach.
 
 ## Going live: before the first paying client
